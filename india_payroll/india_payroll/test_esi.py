@@ -12,6 +12,7 @@ from hrms.payroll.doctype.salary_structure.test_salary_structure import (
 )
 from hrms.tests.utils import HRMSTestSuite
 
+from india_payroll.india_payroll.epf import _compute_pf_wage
 from india_payroll.india_payroll.esi import (
 	ESI_EMPLOYEE_COMPONENT,
 	ESI_RATE,
@@ -411,3 +412,4 @@ class TestESI(HRMSTestSuite):
 
 		self.assertEqual(_esi_wage(slip), 10_000)
 		self.assertEqual(_esi_wage(slip, use_default_amount=True), 20_000)
+		self.assertEqual(_compute_pf_wage(slip), 10_000)

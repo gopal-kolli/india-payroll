@@ -15,6 +15,11 @@ VPF_COMPONENT = "Voluntary Provident Fund"
 
 EPF_EMPLOYEE_COMPONENTS = (EPF_EMPLOYEE_COMPONENT, VPF_COMPONENT)
 
+# Backward compatibility for CTC-style structures that carried employer
+# contributions as earnings before HRMS added the Employer Contributions
+# table. These amounts are not employee PF wages.
+EPF_NON_WAGE_EARNINGS = frozenset({"Employer PF", "Employer ESI"})
+
 # --- Statutory constants --------------------------------------------------
 # Employer-side rates remain here even though the slip hook no longer applies
 # them — the EPF register / ECR report reads them when reconstructing the
@@ -112,9 +117,11 @@ def _compute_pf_wage(doc) -> float:
 
 	PF wage is *not* gross pay. Two categories of earning are excluded per
 	EPF statute (Sec. 2(b) excludes HRA; the EPFO circular excludes ad-hoc /
-	incentive-type pay):
+	incentive-type pay), and legacy employer-contribution earnings are not
+	employee wages:
 
 	  • HRA — identified from the Company master's ``hra_component`` field.
+	  • Employer PF/ESI carried as earnings in legacy CTC-style structures.
 	  • Any earning sourced from an Additional Salary (bonuses, incentives,
 	    arrears and other one-off components), flagged by ``additional_salary``
 	    on the slip row.
@@ -128,6 +135,10 @@ def _compute_pf_wage(doc) -> float:
 	for e in doc.earnings:
 		# Skip HRA — excluded from PF wage by statute.
 		if hra_component and e.salary_component == hra_component:
+			continue
+		# Skip employer contributions represented as earnings by legacy
+		# CTC-style structures.
+		if e.salary_component in EPF_NON_WAGE_EARNINGS:
 			continue
 		# Skip anything injected from an Additional Salary (bonuses/incentives).
 		if e.get("additional_salary"):
