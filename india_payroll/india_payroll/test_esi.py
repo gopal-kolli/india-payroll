@@ -17,6 +17,7 @@ from india_payroll.india_payroll.esi import (
 	ESI_RATE,
 	ESI_WAGE_CEILING,
 	ESI_WAGE_CEILING_DISABILITY,
+	_esi_wage,
 )
 from india_payroll.install import create_esi_components
 
@@ -382,3 +383,31 @@ class TestESI(HRMSTestSuite):
 
 		self.assertAlmostEqual(slip.gross_pay, 10_000, places=2)
 		self.assertAlmostEqual(self._esi_rows(slip)[0].amount, flt(10_000 * ESI_RATE, 2), places=2)
+
+	def test_esi_wage_excludes_legacy_employer_contribution_earnings(self):
+		"""Employer PF/ESI earnings in a CTC-style structure are not ESI wages."""
+		slip = frappe._dict(
+			earnings=[
+				frappe._dict(
+					salary_component="Basic",
+					amount=10_000,
+					default_amount=20_000,
+					do_not_include_in_total=0,
+				),
+				frappe._dict(
+					salary_component="Employer PF",
+					amount=600,
+					default_amount=1_200,
+					do_not_include_in_total=0,
+				),
+				frappe._dict(
+					salary_component="Employer ESI",
+					amount=325,
+					default_amount=650,
+					do_not_include_in_total=0,
+				),
+			]
+		)
+
+		self.assertEqual(_esi_wage(slip), 10_000)
+		self.assertEqual(_esi_wage(slip, use_default_amount=True), 20_000)
