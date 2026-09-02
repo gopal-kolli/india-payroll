@@ -2,6 +2,9 @@ name: Linters
 
 on:
   pull_request:
+  push:
+    branches:
+      - codex/epf-wage-fix-v16
   workflow_dispatch:
 
 permissions:
@@ -15,8 +18,6 @@ jobs:
   linter:
     name: 'Frappe Linter'
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
