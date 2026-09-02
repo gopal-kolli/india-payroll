@@ -28,9 +28,7 @@ def get_effective_ssa_values(
 
 
 def get_slip_ssa_values(doc, fields: list[str]) -> "frappe._dict":
-	values = get_effective_ssa_values(
-		doc.employee, doc.company, doc.salary_structure, doc.start_date, fields
-	)
+	values = get_effective_ssa_values(doc.employee, doc.company, doc.salary_structure, doc.start_date, fields)
 	if values or not doc.end_date:
 		return values
 
@@ -39,6 +37,4 @@ def get_slip_ssa_values(doc, fields: list[str]) -> "frappe._dict":
 	# slip correctly, so fall back to the period end for the statutory fields.
 	# Keep the start-date lookup first so mid-month revisions for existing
 	# employees do not silently change the assignment used by the core slip.
-	return get_effective_ssa_values(
-		doc.employee, doc.company, doc.salary_structure, doc.end_date, fields
-	)
+	return get_effective_ssa_values(doc.employee, doc.company, doc.salary_structure, doc.end_date, fields)

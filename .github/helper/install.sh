@@ -16,6 +16,10 @@ if [[ "$INDIA_PAYROLL_BRANCH" == "version-1" || "$INDIA_PAYROLL_BRANCH" == "vers
     FRAPPE_BRANCH="version-15"
     ERPNEXT_BRANCH="version-15"
     HRMS_BRANCH="version-15"
+elif [[ "$INDIA_PAYROLL_BRANCH" == version-16* || "$INDIA_PAYROLL_BRANCH" == codex/epf-wage-fix-v16 ]]; then
+    FRAPPE_BRANCH="version-16"
+    ERPNEXT_BRANCH="version-16"
+    HRMS_BRANCH="version-16"
 else
     FRAPPE_BRANCH="develop"
     ERPNEXT_BRANCH="develop"

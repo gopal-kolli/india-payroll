@@ -74,8 +74,7 @@ def _esi_wage(doc, *, use_default_amount: bool = False) -> float:
 	return sum(
 		flt(e.get(amount_field))
 		for e in doc.earnings
-		if not e.get("do_not_include_in_total")
-		and e.get("salary_component") not in ESI_NON_WAGE_EARNINGS
+		if not e.get("do_not_include_in_total") and e.get("salary_component") not in ESI_NON_WAGE_EARNINGS
 	)
 
 

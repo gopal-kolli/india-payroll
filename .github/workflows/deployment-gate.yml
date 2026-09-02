@@ -1,0 +1,32 @@
+name: Deployment Gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - codex/epf-wage-fix-v16
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployment-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Validate source, metadata and regression inventory
+        run: |
+          python -m compileall -q india_payroll
+          python -c 'import tomllib; tomllib.load(open("pyproject.toml", "rb"))'
+          test -s india_payroll/india_payroll/test_epf.py
+          test -s india_payroll/india_payroll/test_esi.py
+          test -s india_payroll/india_payroll/test_utils.py
