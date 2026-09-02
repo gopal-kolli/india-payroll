@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - develop
+      - codex/epf-wage-fix-v16
     paths-ignore:
       - "**.css"
       - "**.js"
@@ -29,7 +30,7 @@ env:
   INDIA_PAYROLL_BRANCH: ${{ github.base_ref || github.ref_name }}
 
 concurrency:
-  group: develop-india_payroll-${{ github.event.number }}
+  group: india-payroll-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
