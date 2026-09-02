@@ -49,7 +49,7 @@ jobs:
 
     steps:
       - name: Clone
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Find tests
         run: |
@@ -57,12 +57,12 @@ jobs:
           grep -rn "def test" > /dev/null
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.14'
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           check-latest: true
@@ -71,7 +71,7 @@ jobs:
         run: echo "127.0.0.1 test_site" | sudo tee -a /etc/hosts
 
       - name: Cache pip
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/*requirements.txt', '**/pyproject.toml', '**/setup.py', '**/setup.cfg') }}
@@ -81,9 +81,9 @@ jobs:
 
       - name: Get yarn cache directory path
         id: yarn-cache-dir-path
-        run: echo "::set-output name=dir::$(yarn cache dir)"
+        run: echo "dir=$(yarn cache dir)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         id: yarn-cache
         with:
           path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
