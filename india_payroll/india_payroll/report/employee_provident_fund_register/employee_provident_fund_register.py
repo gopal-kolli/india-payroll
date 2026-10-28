@@ -11,10 +11,11 @@ from frappe.utils import flt
 from india_payroll.india_payroll.epf import (
 	EPF_EMPLOYEE_COMPONENT,
 	EPF_EMPLOYER_RATE,
-	EPF_WAGE_CEILING,
 	EPS_RATE,
 	VPF_COMPONENT,
 	_epfo_round,
+	get_capped_pf_wage,
+	get_eps_wage,
 )
 from india_payroll.india_payroll.utils import get_effective_ssa_values
 
@@ -157,6 +158,7 @@ def get_data(filters):
 			SS.company,
 			SS.salary_structure,
 			SS.start_date,
+			SS.end_date,
 			SS.gross_pay,
 			SS.currency,
 			SS.leave_without_pay,
@@ -211,16 +213,12 @@ def get_data(filters):
 		vpf = flt(totals.get(VPF_COMPONENT))
 
 		contribute_on_actual = bool(s.get("contribute_on_actual_pf_wage"))
-		pf_wage_capped = min(pf_wage, EPF_WAGE_CEILING)
+		pf_wage_capped = get_capped_pf_wage(pf_wage, s.start_date, s.end_date)
 		epf_base = pf_wage if contribute_on_actual else pf_wage_capped
 
 		# Post-1 Sept 2014 EPS rule: members whose PF wage > ceiling get no EPS.
-		if pf_wage > EPF_WAGE_CEILING:
-			eps_wages = 0.0
-			eps_contribution = 0
-		else:
-			eps_wages = pf_wage_capped
-			eps_contribution = _epfo_round(pf_wage_capped * EPS_RATE)
+		eps_wages = get_eps_wage(pf_wage, s.start_date, s.end_date)
+		eps_contribution = _epfo_round(eps_wages * EPS_RATE) if eps_wages else 0
 
 		employer_total = _epfo_round(epf_base * EPF_EMPLOYER_RATE)
 		employer_epf_diff = max(0, employer_total - eps_contribution)

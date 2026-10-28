@@ -1,8 +1,10 @@
 # Copyright (c) 2026, Frappe Technologies Pvt. Ltd. and contributors
 # License: GNU General Public License v3. See license.txt
 
+import datetime
+
 import frappe
-from frappe.utils import flt
+from frappe.utils import flt, getdate
 
 from india_payroll.india_payroll.utils import get_slip_ssa_values
 
@@ -24,7 +26,12 @@ EPF_NON_WAGE_EARNINGS = frozenset({"Employer PF", "Employer ESI"})
 # Employer-side rates remain here even though the slip hook no longer applies
 # them — the EPF register / ECR report reads them when reconstructing the
 # canonical employer split per EPFO statute.
-EPF_WAGE_CEILING = 15_000  # PF / EPS / EDLI statutory ceiling
+# S.O. 5109(E) raised the PF / EPS / EDLI wage ceiling from ₹15,000 to ₹25,000
+# with effect from 17 September 2026. Use the helpers below rather than the
+# constants directly, so wage periods before the revision keep the old ceiling.
+EPF_WAGE_CEILING = 25_000  # PF / EPS / EDLI statutory ceiling from 17 Sep 2026
+EPF_PREVIOUS_WAGE_CEILING = 15_000  # ceiling up to 16 Sep 2026
+EPF_WAGE_CEILING_EFFECTIVE_FROM = datetime.date(2026, 9, 17)
 EPF_EMPLOYEE_RATE = 0.12  # employee EPF share
 EPF_EMPLOYER_RATE = 0.12  # employer total share (split between EPF + EPS)
 EPS_RATE = 0.0833  # employer's pension diversion
@@ -83,7 +90,7 @@ def apply_epf(doc, method=None) -> None:
 		return
 
 	contribute_on_actual = bool(ssa.get("contribute_on_actual_pf_wage"))
-	pf_wage_capped = min(pf_wage, EPF_WAGE_CEILING)
+	pf_wage_capped = get_capped_pf_wage(pf_wage, doc.start_date, doc.end_date)
 	epf_base = pf_wage if contribute_on_actual else pf_wage_capped
 
 	employee_epf = _epfo_round(epf_base * EPF_EMPLOYEE_RATE)
@@ -96,6 +103,51 @@ def apply_epf(doc, method=None) -> None:
 	)
 
 	_apply_epf_components(doc, employee_epf=employee_epf, vpf=vpf)
+
+
+# ---------------------------------------------------------------------------
+# Wage ceiling
+# ---------------------------------------------------------------------------
+
+
+def _wage_ceiling_parts(start_date, end_date) -> list[tuple[int, float]]:
+	"""
+	(ceiling, share of the wage period) pairs covering the period.
+
+	A period that spans 17 Sep 2026 is split by calendar days, each part
+	under its own ceiling — the September 2026 method in EPFO's FAQ on
+	S.O. 5109(E) (Q7, Q9).
+	"""
+	start, end = getdate(start_date), getdate(end_date)
+	if end < EPF_WAGE_CEILING_EFFECTIVE_FROM:
+		return [(EPF_PREVIOUS_WAGE_CEILING, 1.0)]
+	if start >= EPF_WAGE_CEILING_EFFECTIVE_FROM:
+		return [(EPF_WAGE_CEILING, 1.0)]
+
+	total_days = (end - start).days + 1
+	days_before = (EPF_WAGE_CEILING_EFFECTIVE_FROM - start).days
+	return [
+		(EPF_PREVIOUS_WAGE_CEILING, days_before / total_days),
+		(EPF_WAGE_CEILING, (total_days - days_before) / total_days),
+	]
+
+
+def get_capped_pf_wage(pf_wage: float, start_date, end_date) -> float:
+	"""PF wage limited to the statutory ceiling in force during the wage period."""
+	return sum(min(pf_wage, ceiling) * share for ceiling, share in _wage_ceiling_parts(start_date, end_date))
+
+
+def get_eps_wage(pf_wage: float, start_date, end_date) -> float:
+	"""
+	EPS wage for a post-1 Sept 2014 member: only the parts of the period in
+	which the PF wage is within that part's ceiling earn EPS. A ₹20,000 earner
+	therefore joins EPS from 17 Sep 2026 (FAQ Q9, Q12).
+	"""
+	return sum(
+		min(pf_wage, ceiling) * share
+		for ceiling, share in _wage_ceiling_parts(start_date, end_date)
+		if pf_wage <= ceiling
+	)
 
 
 # ---------------------------------------------------------------------------
