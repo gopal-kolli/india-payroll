@@ -61,9 +61,12 @@ def structure_carries(salary_structure: str | None, parentfield: str, component:
 	)
 
 
-def set_structure_leg(doc, parentfield: str, component: str, amount: float) -> bool:
-	"""Set the structure row of ``component`` to ``amount`` - added when missing, dropped at
-	zero - and return whether the slip changed. Additional Salary rows are left as entered.
+def set_structure_leg(
+	doc, parentfield: str, component: str, amount: float, *, add_missing: bool = True
+) -> bool:
+	"""Set the structure row of ``component`` to ``amount`` - added when missing (unless
+	``add_missing`` is off), dropped at zero - and return whether the slip changed. Additional
+	Salary rows are left as entered.
 
 	The row no longer prorates: ``amount`` is already the contribution on the wages paid. An
 	existing row keeps its full-month ``default_amount``, which coverage tests read.
@@ -71,6 +74,8 @@ def set_structure_leg(doc, parentfield: str, component: str, amount: float) -> b
 	rows = [
 		r for r in doc.get(parentfield) if r.salary_component == component and not r.get("additional_salary")
 	]
+	if not rows and not add_missing:
+		return False
 	if len(rows) <= 1 and flt(rows[0].amount if rows else 0) == flt(amount):
 		return False
 

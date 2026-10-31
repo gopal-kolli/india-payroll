@@ -92,7 +92,15 @@ def apply_epf(doc, method=None) -> None:
 		return
 
 	contribute_on_actual = bool(ssa.get("contribute_on_actual_pf_wage"))
-	sizes_employer_leg = structure_carries(doc.salary_structure, "earnings", EMPLOYER_PF_EARNING)
+	# Only a complete pair the structure already put on the slip: an employer earning with
+	# no deduction taking it back would be paid out to the employee.
+	sizes_employer_leg = (
+		structure_carries(doc.salary_structure, "earnings", EMPLOYER_PF_EARNING)
+		and structure_carries(doc.salary_structure, "deductions", EMPLOYER_PF_DEDUCTION)
+		and any(
+			e.salary_component == EMPLOYER_PF_EARNING and not e.get("additional_salary") for e in doc.earnings
+		)
+	)
 
 	# The employer's PF is itself remuneration in the section 2(88) one-half test, so in a
 	# month with one-off pay the PF wage and the employer leg depend on each other. Each
@@ -125,9 +133,8 @@ def apply_epf(doc, method=None) -> None:
 def _set_employer_pf_leg(doc, amount: float) -> bool:
 	"""Match the "Employer PF" earning and its "Provident Fund - Employer" deduction to the
 	employee's share. Returns whether the earning changed, which moves the PF wage."""
-	changed = set_structure_leg(doc, "earnings", EMPLOYER_PF_EARNING, amount)
-	if structure_carries(doc.salary_structure, "deductions", EMPLOYER_PF_DEDUCTION):
-		set_structure_leg(doc, "deductions", EMPLOYER_PF_DEDUCTION, amount)
+	changed = set_structure_leg(doc, "earnings", EMPLOYER_PF_EARNING, amount, add_missing=False)
+	set_structure_leg(doc, "deductions", EMPLOYER_PF_DEDUCTION, amount)
 	if changed:
 		refresh_gross_pay(doc)
 	return changed

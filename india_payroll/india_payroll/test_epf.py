@@ -54,6 +54,7 @@ _TEST_EMAILS = [
 	"test_epf_new_bracket@indiapayroll.com",
 	"test_epf_september_split@indiapayroll.com",
 	"test_epf_one_off_pay_leg@indiapayroll.com",
+	"test_epf_unpaired_leg@indiapayroll.com",
 ]
 
 
@@ -462,18 +463,10 @@ class TestEPF(HRMSTestSuite):
 		# ₹10,000 earner was always within the ceiling.
 		self.assertEqual(get_eps_wage(10_000, "2026-09-01", "2026-09-30"), 10_000)
 
-	@HRMSTestSuite.change_settings(
-		"Payroll Settings",
-		{"enable_epf": 1, "enable_professional_tax": 0, "enable_esic": 0, "enable_lwf": 0},
-	)
-	def test_one_off_pay_settles_pf_wage_and_employer_leg(self):
-		"""
-		CTC-style structure: Basic 15,000, HRA 12,000, an "Employer PF" earning
-		taken back by "Provident Fund - Employer", and a 10,000 incentive paid by
-		Additional Salary. The exclusions pass one half of remuneration, so the
-		excess is added back to the PF wage; the employer leg is itself in that
-		test, and the two settle at PF wage 19,681 with 2,362 on every PF row.
-		"""
+	def _one_off_pay_slip(self, email: str, structure_name: str, *, employer_deduction: bool):
+		"""Basic 15,000 + HRA 12,000 + an "Employer PF" earning (12% of Basic), with or
+		without the "Provident Fund - Employer" deduction that takes it back, and a 10,000
+		incentive paid by Additional Salary. Returns the inserted October slip."""
 		earnings = [
 			{"salary_component": "EPF Code Basic", "abbr": "EPFCB", "formula": "base * 0.5"},
 			{"salary_component": "EPF Code HRA", "abbr": "EPFCHRA", "formula": "base * 0.4"},
@@ -492,42 +485,81 @@ class TestEPF(HRMSTestSuite):
 				["_Test Company"],
 			)
 
+		employee = make_employee(email, company="_Test Company")
+		structure = make_salary_structure(
+			structure_name,
+			"Monthly",
+			company="_Test Company",
+			currency="INR",
+			earnings=earnings,
+			deductions=deductions if employer_deduction else [],
+		)
+		ssa = create_salary_structure_assignment(
+			employee, structure.name, from_date="2026-10-01", company="_Test Company", base=30_000
+		)
+		frappe.db.set_value("Salary Structure Assignment", ssa.name, "epf_applicable", 1)
+		frappe.get_doc(
+			{
+				"doctype": "Additional Salary",
+				"employee": employee,
+				"company": "_Test Company",
+				"salary_component": "EPF Test Incentive",
+				"amount": 10_000,
+				"payroll_date": "2026-10-15",
+				"overwrite_salary_structure_amount": 0,
+			}
+		).insert().submit()
+
+		slip = make_salary_slip(structure.name, employee=employee, posting_date="2026-10-31")
+		slip.insert()
+		return slip
+
+	@HRMSTestSuite.change_settings(
+		"Payroll Settings",
+		{"enable_epf": 1, "enable_professional_tax": 0, "enable_esic": 0, "enable_lwf": 0},
+	)
+	def test_one_off_pay_settles_pf_wage_and_employer_leg(self):
+		"""
+		The incentive takes the exclusions past one half of remuneration, so the
+		excess is added back to the PF wage. The employer leg is itself in that test;
+		the two settle at PF wage 19,681 with 2,362 on every PF row.
+		"""
 		previous_hra = frappe.db.get_value("Company", "_Test Company", "hra_component")
 		frappe.db.set_value("Company", "_Test Company", "hra_component", "EPF Code HRA")
 		try:
-			employee = make_employee("test_epf_one_off_pay_leg@indiapayroll.com", company="_Test Company")
-			structure = make_salary_structure(
+			slip = self._one_off_pay_slip(
+				"test_epf_one_off_pay_leg@indiapayroll.com",
 				"Test EPF One-off Pay Structure",
-				"Monthly",
-				company="_Test Company",
-				currency="INR",
-				earnings=earnings,
-				deductions=deductions,
+				employer_deduction=True,
 			)
-			ssa = create_salary_structure_assignment(
-				employee, structure.name, from_date="2026-10-01", company="_Test Company", base=30_000
-			)
-			frappe.db.set_value("Salary Structure Assignment", ssa.name, "epf_applicable", 1)
-			incentive = frappe.get_doc(
-				{
-					"doctype": "Additional Salary",
-					"employee": employee,
-					"company": "_Test Company",
-					"salary_component": "EPF Test Incentive",
-					"amount": 10_000,
-					"payroll_date": "2026-10-15",
-					"overwrite_salary_structure_amount": 0,
-				}
-			).insert()
-			incentive.submit()
-
-			slip = make_salary_slip(structure.name, employee=employee, posting_date="2026-10-31")
-			slip.insert()
-
 			self.assertEqual(self._amount(slip, "deductions", EPF_EMPLOYEE_COMPONENT), 2_362)
 			self.assertEqual(self._amount(slip, "earnings", "Employer PF"), 2_362)
 			self.assertEqual(self._amount(slip, "deductions", "Provident Fund - Employer"), 2_362)
 			self.assertAlmostEqual(slip.gross_pay, 15_000 + 12_000 + 10_000 + 2_362, places=2)
 			self.assertAlmostEqual(_compute_pf_wage(slip), 19_681, places=2)
+		finally:
+			frappe.db.set_value("Company", "_Test Company", "hra_component", previous_hra)
+
+	@HRMSTestSuite.change_settings(
+		"Payroll Settings",
+		{"enable_epf": 1, "enable_professional_tax": 0, "enable_esic": 0, "enable_lwf": 0},
+	)
+	def test_employer_pf_earning_without_deduction_is_left_alone(self):
+		"""
+		Without the deduction that takes it back, the "Employer PF" earning would be
+		paid out, so the hook leaves it at the structure's 1,800. The PF wage still
+		adds back the excess: remuneration 38,800, exclusions 23,800 → 19,400 → 2,328.
+		"""
+		previous_hra = frappe.db.get_value("Company", "_Test Company", "hra_component")
+		frappe.db.set_value("Company", "_Test Company", "hra_component", "EPF Code HRA")
+		try:
+			slip = self._one_off_pay_slip(
+				"test_epf_unpaired_leg@indiapayroll.com",
+				"Test EPF Unpaired Leg Structure",
+				employer_deduction=False,
+			)
+			self.assertEqual(self._amount(slip, "earnings", "Employer PF"), 1_800)
+			self.assertEqual(self._amount(slip, "deductions", "Provident Fund - Employer"), 0)
+			self.assertEqual(self._amount(slip, "deductions", EPF_EMPLOYEE_COMPONENT), 2_328)
 		finally:
 			frappe.db.set_value("Company", "_Test Company", "hra_component", previous_hra)
