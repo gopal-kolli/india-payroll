@@ -8,14 +8,13 @@ from frappe import _
 from frappe.query_builder import DocType
 from frappe.utils import flt
 
+from india_payroll.india_payroll.code_wages import get_hra_component, split_remuneration, wages_from_split
+from india_payroll.india_payroll.esi import ESI_EMPLOYEE_COMPONENT
 from india_payroll.india_payroll.utils import get_effective_ssa_values
 
-# Statutory rates (ESI Act, 1948 — effective July 2019)
+# Statutory rates (unchanged under the Code on Social Security, 2020)
 EMPLOYEE_ESI_RATE = 0.0075  # 0.75 %
 EMPLOYER_ESI_RATE = 0.0325  # 3.25 %
-
-ESI_WAGE_CEILING = 21_000
-ESI_WAGE_CEILING_DISABILITY = 25_000
 
 _MONTHS = {
 	"January": 1,
@@ -70,7 +69,7 @@ def get_columns():
 			"width": 140,
 		},
 		{
-			"label": _("Gross Wages"),
+			"label": _("ESI Wages"),
 			"fieldname": "gross_wages",
 			"fieldtype": "Currency",
 			"options": "currency",
@@ -124,6 +123,7 @@ def get_data(filters):
 		.join(Emp)
 		.on(Emp.name == SS.employee)
 		.select(
+			SS.name,
 			SS.employee,
 			SS.company,
 			SS.salary_structure,
@@ -150,18 +150,21 @@ def get_data(filters):
 	rows = query.run(as_dict=True)
 
 	coverage_filter = filters.get("coverage_status")
+	wages_by_slip, covered_slips = _esi_wages_by_slip(rows)
 
 	data = []
 	for row in rows:
-		gross = flt(row.gross_pay)
+		# Section 2(88) wages, as the slip levied ESI on them (see code_wages).
+		wages = wages_by_slip.get(row.name, 0.0)
 		# The PwD flag lives on the Salary Structure Assignment effective for the slip.
 		ssa = get_effective_ssa_values(
 			row.employee, row.company, row.salary_structure, row.start_date, ["is_person_with_disability"]
 		)
 		is_pwd = bool(ssa.get("is_person_with_disability"))
-		ceiling = ESI_WAGE_CEILING_DISABILITY if is_pwd else ESI_WAGE_CEILING
 
-		if gross > ceiling:
+		# The slip decided coverage (ceiling on full-month wages, contribution-period
+		# continuity); the register reports that decision rather than re-deriving it.
+		if row.name not in covered_slips:
 			status = "Exempt"
 		elif is_pwd:
 			status = "PwD"
@@ -174,8 +177,8 @@ def get_data(filters):
 		if status == "Exempt":
 			employee_esi = employer_esi = total_esi = 0.0
 		else:
-			employee_esi = flt(gross * EMPLOYEE_ESI_RATE, 2)
-			employer_esi = flt(gross * EMPLOYER_ESI_RATE, 2)
+			employee_esi = flt(wages * EMPLOYEE_ESI_RATE, 2)
+			employer_esi = flt(wages * EMPLOYER_ESI_RATE, 2)
 			total_esi = flt(employee_esi + employer_esi, 2)
 
 		data.append(
@@ -184,7 +187,7 @@ def get_data(filters):
 				"esic_card_no": row.get("esic_card_no") or "",
 				"department": row.get("department") or "",
 				"designation": row.get("designation") or "",
-				"gross_wages": gross,
+				"gross_wages": wages,
 				"employee_esi": employee_esi,
 				"employer_esi": employer_esi,
 				"total_esi": total_esi,
@@ -194,6 +197,45 @@ def get_data(filters):
 		)
 
 	return data
+
+
+def _esi_wages_by_slip(slips) -> tuple[dict, set]:
+	"""Section 2(88) wages per slip, and the slips that carry an ESI deduction."""
+	if not slips:
+		return {}, set()
+
+	company_by_slip = {s.name: s.company for s in slips}
+	hra_by_company = {company: get_hra_component(company) for company in set(company_by_slip.values())}
+	details = frappe.get_all(
+		"Salary Detail",
+		filters={"parenttype": "Salary Slip", "parent": ("in", list(company_by_slip))},
+		fields=[
+			"parent",
+			"parentfield",
+			"salary_component",
+			"amount",
+			"additional_salary",
+			"do_not_include_in_total",
+		],
+	)
+
+	earnings_by_slip: dict[str, list] = {}
+	covered = set()
+	for d in details:
+		if d.parentfield == "earnings":
+			earnings_by_slip.setdefault(d.parent, []).append(d)
+		elif (
+			d.parentfield == "deductions"
+			and d.salary_component == ESI_EMPLOYEE_COMPONENT
+			and flt(d.amount) > 0
+		):
+			covered.add(d.parent)
+
+	wages = {
+		slip: wages_from_split(*split_remuneration(earnings, hra_by_company.get(company_by_slip[slip])))
+		for slip, earnings in earnings_by_slip.items()
+	}
+	return wages, covered
 
 
 def _get_date_range(filters):

@@ -6,6 +6,7 @@ import datetime
 import frappe
 from frappe.utils import flt, getdate
 
+from india_payroll.india_payroll.code_wages import get_code_wages
 from india_payroll.india_payroll.utils import get_slip_ssa_values
 
 # Employee deductions (reduce net pay).  Employer EPF/EPS/EDLI/Admin are
@@ -16,11 +17,6 @@ EPF_EMPLOYEE_COMPONENT = "Provident Fund"
 VPF_COMPONENT = "Voluntary Provident Fund"
 
 EPF_EMPLOYEE_COMPONENTS = (EPF_EMPLOYEE_COMPONENT, VPF_COMPONENT)
-
-# Backward compatibility for CTC-style structures that carried employer
-# contributions as earnings before HRMS added the Employer Contributions
-# table. These amounts are not employee PF wages.
-EPF_NON_WAGE_EARNINGS = frozenset({"Employer PF", "Employer ESI"})
 
 # --- Statutory constants --------------------------------------------------
 # Employer-side rates remain here even though the slip hook no longer applies
@@ -165,39 +161,19 @@ def _required_components_exist() -> bool:
 
 def _compute_pf_wage(doc) -> float:
 	"""
-	Sum the PF-eligible earnings on the slip.
+	PF wage: section 2(88) wages of the Code on Social Security, 2020 (see
+	code_wages.get_code_wages). EPFO applies the ceiling to these wages, not
+	to gross pay (wage-ceiling FAQ Q24-Q25).
 
-	PF wage is *not* gross pay. Two categories of earning are excluded per
-	EPF statute (Sec. 2(b) excludes HRA; the EPFO circular excludes ad-hoc /
-	incentive-type pay), and legacy employer-contribution earnings are not
-	employee wages:
-
-	  • HRA — identified from the Company master's ``hra_component`` field.
-	  • Employer PF/ESI carried as earnings in legacy CTC-style structures.
-	  • Any earning sourced from an Additional Salary (bonuses, incentives,
-	    arrears and other one-off components), flagged by ``additional_salary``
-	    on the slip row.
+	HRA, employer PF/ESI carried as earnings by CTC-style structures, and
+	anything paid through an Additional Salary (bonus, incentive, arrears) are
+	left out — but only up to one half of remuneration; the excess is added
+	back, so an incentive month can raise the PF wage.
 
 	Amounts on `doc.earnings` are already prorated for LOP / payment_days by
 	the Salary Slip controller, so the returned PF wage reflects NCP days.
 	"""
-	hra_component = frappe.db.get_value("Company", doc.company, "hra_component") if doc.company else None
-
-	total = 0.0
-	for e in doc.earnings:
-		# Skip HRA — excluded from PF wage by statute.
-		if hra_component and e.salary_component == hra_component:
-			continue
-		# Skip employer contributions represented as earnings by legacy
-		# CTC-style structures.
-		if e.salary_component in EPF_NON_WAGE_EARNINGS:
-			continue
-		# Skip anything injected from an Additional Salary (bonuses/incentives).
-		if e.get("additional_salary"):
-			continue
-		total += flt(e.amount)
-
-	return total
+	return get_code_wages(doc)
 
 
 def _compute_vpf(doc, epf_base: float, *, vpf_mode=None, vpf_percentage=None, vpf_amount=None) -> float:

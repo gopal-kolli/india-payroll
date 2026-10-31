@@ -8,7 +8,9 @@ from india_payroll.india_payroll.professional_tax import apply_professional_tax
 
 
 def apply_regional_deductions(doc) -> None:
-	apply_professional_tax(doc)
+	# ESI first: it sizes the "Employer ESI" earning and refreshes gross pay,
+	# which Professional Tax reads.
 	apply_esi(doc)
+	apply_professional_tax(doc)
 	apply_lwf(doc)
 	apply_epf(doc)

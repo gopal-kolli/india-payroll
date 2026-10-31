@@ -8,6 +8,7 @@ from frappe import _
 from frappe.query_builder import DocType
 from frappe.utils import flt
 
+from india_payroll.india_payroll.code_wages import get_hra_component, split_remuneration, wages_from_split
 from india_payroll.india_payroll.epf import (
 	EPF_EMPLOYEE_COMPONENT,
 	EPF_EMPLOYER_RATE,
@@ -253,9 +254,8 @@ def get_data(filters):
 def _aggregate_salary_detail(company_by_slip: dict) -> dict:
 	"""One Salary Detail sweep across all slips in the report.
 
-	PF wage is the sum of PF-eligible earnings, mirroring ``epf._compute_pf_wage``:
-	HRA (identified from each slip's Company master ``hra_component``) and any
-	earning sourced from an Additional Salary (bonuses/incentives) are excluded.
+	PF wage is section 2(88) wages, exactly as ``epf._compute_pf_wage`` computes
+	it on the slip (see code_wages).
 
 	Returns: { slip_name: { "pf_wage": ..., "Provident Fund": ..., "Voluntary Provident Fund": ... } }
 	"""
@@ -263,11 +263,7 @@ def _aggregate_salary_detail(company_by_slip: dict) -> dict:
 		return {}
 
 	# Cache hra_component per company so multi-company reports do one lookup each.
-	hra_by_company: dict[str, str | None] = {}
-	for company in set(company_by_slip.values()):
-		hra_by_company[company] = (
-			frappe.db.get_value("Company", company, "hra_component") if company else None
-		)
+	hra_by_company = {company: get_hra_component(company) for company in set(company_by_slip.values())}
 
 	rows = frappe.get_all(
 		"Salary Detail",
@@ -275,25 +271,31 @@ def _aggregate_salary_detail(company_by_slip: dict) -> dict:
 			"parenttype": "Salary Slip",
 			"parent": ("in", list(company_by_slip)),
 		},
-		fields=["parent", "parentfield", "salary_component", "amount", "additional_salary"],
+		fields=[
+			"parent",
+			"parentfield",
+			"salary_component",
+			"amount",
+			"additional_salary",
+			"do_not_include_in_total",
+		],
 	)
 
 	totals: dict[str, dict] = {}
+	earnings_by_slip: dict[str, list] = {}
 	for r in rows:
 		bucket = totals.setdefault(r.parent, {})
 		if r.parentfield == "earnings":
-			hra_component = hra_by_company.get(company_by_slip.get(r.parent))
-			# Exclude HRA and Additional-Salary earnings from PF wage.
-			if hra_component and r.salary_component == hra_component:
-				continue
-			if r.additional_salary:
-				continue
-			bucket["pf_wage"] = flt(bucket.get("pf_wage")) + flt(r.amount)
+			earnings_by_slip.setdefault(r.parent, []).append(r)
 		elif r.parentfield == "deductions" and r.salary_component in (
 			EPF_EMPLOYEE_COMPONENT,
 			VPF_COMPONENT,
 		):
 			bucket[r.salary_component] = flt(bucket.get(r.salary_component)) + flt(r.amount)
+
+	for slip, earnings in earnings_by_slip.items():
+		hra_component = hra_by_company.get(company_by_slip.get(slip))
+		totals[slip]["pf_wage"] = wages_from_split(*split_remuneration(earnings, hra_component))
 	return totals
 
 
