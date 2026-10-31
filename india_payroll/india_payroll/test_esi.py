@@ -12,13 +12,16 @@ from hrms.payroll.doctype.salary_structure.test_salary_structure import (
 )
 from hrms.tests.utils import HRMSTestSuite
 
+from india_payroll.india_payroll.code_wages import split_remuneration, wages_from_split
 from india_payroll.india_payroll.epf import _compute_pf_wage
 from india_payroll.india_payroll.esi import (
+	EMPLOYER_ESI_COMPONENT,
 	ESI_EMPLOYEE_COMPONENT,
 	ESI_RATE,
 	ESI_WAGE_CEILING,
 	ESI_WAGE_CEILING_DISABILITY,
 	_esi_wage,
+	contribution_period_start,
 )
 from india_payroll.install import create_esi_components
 
@@ -68,6 +71,7 @@ class TestESI(HRMSTestSuite):
 			"test_esi_net_pay@indiapayroll.com",
 			"test_esi_lop_eligibility@indiapayroll.com",
 			"test_esi_lop_contribution@indiapayroll.com",
+			"test_esi_code_wages_ctc@indiapayroll.com",
 		]
 		create_esi_components()
 		self._ensure_esi_test_components()
@@ -413,3 +417,120 @@ class TestESI(HRMSTestSuite):
 		self.assertEqual(_esi_wage(slip), 10_000)
 		self.assertEqual(_esi_wage(slip, use_default_amount=True), 20_000)
 		self.assertEqual(_compute_pf_wage(slip), 10_000)
+
+	# --- Code on Social Security, 2020: section 2(88) wages -------------------------
+
+	@staticmethod
+	def _row(component, amount, default_amount=None, additional_salary=None):
+		return frappe._dict(
+			salary_component=component,
+			amount=amount,
+			default_amount=amount if default_amount is None else default_amount,
+			additional_salary=additional_salary,
+			do_not_include_in_total=0,
+		)
+
+	def test_code_wages_exclude_hra_and_employer_contributions(self):
+		"""A CTC-style month (SOLARA, Oct 2026): ESI wages are Basic + Special
+		Allowance; HRA and the employer legs are 46% of remuneration, under one half."""
+		rows = [
+			self._row("Basic", 10_390),
+			self._row("House Rent Allowance", 8_312),
+			self._row("Employer PF", 1_347),
+			self._row("Special Allowance", 831),
+			self._row("Employer ESI", 635),
+		]
+		total, excluded = split_remuneration(rows, "House Rent Allowance")
+		self.assertEqual((total, excluded), (20_880, 9_659))
+		self.assertEqual(wages_from_split(total, excluded), 11_221)
+
+	def test_code_wages_add_back_exclusions_above_one_half(self):
+		"""An incentive paid by Additional Salary pushes exclusions to 57% of
+		remuneration; the excess over one half is added back to wages. Coverage
+		reads default amounts, where the one-off payment carries none."""
+		rows = [
+			self._row("Basic", 10_390),
+			self._row("House Rent Allowance", 8_312),
+			self._row("Employer PF", 1_347),
+			self._row("Special Allowance", 831),
+			self._row("Incentive", 5_000, default_amount=0, additional_salary="HR-ADS-TEST"),
+		]
+		total, excluded = split_remuneration(rows, "House Rent Allowance")
+		self.assertEqual((total, excluded), (25_880, 14_659))
+		self.assertEqual(wages_from_split(total, excluded), 12_940)
+		self.assertEqual(
+			wages_from_split(*split_remuneration(rows, "House Rent Allowance", "default_amount")), 11_221
+		)
+
+	def test_pf_wage_adds_back_excess_one_off_pay(self):
+		"""PF wage follows the same section 2(88) rule as ESI."""
+		slip = frappe._dict(
+			company=None,
+			earnings=[
+				self._row("Basic", 10_000),
+				self._row("Employer PF", 1_200),
+				self._row("Incentive", 12_000, default_amount=0, additional_salary="HR-ADS-TEST"),
+			],
+		)
+		# remuneration 23,200; exclusions 13,200; one half 11,600 → 1,600 added back
+		self.assertEqual(_compute_pf_wage(slip), 11_600)
+
+	def test_contribution_periods(self):
+		for date, start in (
+			("2026-04-01", "2026-04-01"),
+			("2026-09-30", "2026-04-01"),
+			("2026-10-01", "2026-10-01"),
+			("2026-12-15", "2026-10-01"),
+			("2027-03-01", "2026-10-01"),
+		):
+			self.assertEqual(str(contribution_period_start(date)), start)
+
+	@HRMSTestSuite.change_settings("Payroll Settings", {"enable_esic": 1})
+	def test_ctc_structure_covered_on_code_wages_with_employer_leg(self):
+		"""
+		Base ₹30,000 = Basic 15,000 + HRA 12,000 + employer ESI. Gross is above
+		₹21,000, but section 2(88) wages (Basic) are 15,000, so the employee is
+		covered: 4% deduction ₹600, employer leg ceil(3.25% of 15,000) = ₹488, and
+		the employee bears ₹112 (0.75%).
+		"""
+		components = [
+			{"salary_component": "ESI Code Basic", "abbr": "ECB", "formula": "base * 0.5", "type": "Earning"},
+			{"salary_component": "ESI Code HRA", "abbr": "ECHRA", "formula": "base * 0.4", "type": "Earning"},
+			{
+				"salary_component": EMPLOYER_ESI_COMPONENT,
+				"abbr": "EESI",
+				"formula": "base * 0.0325",
+				"type": "Earning",
+			},
+		]
+		for c in components:
+			c.update(amount_based_on_formula=1, depends_on_payment_days=0)
+			if not frappe.db.exists("Salary Component", c["salary_component"]):
+				make_salary_component([dict(c)], False, ["_Test Company"])
+
+		previous_hra = frappe.db.get_value("Company", "_Test Company", "hra_component")
+		frappe.db.set_value("Company", "_Test Company", "hra_component", "ESI Code HRA")
+		try:
+			employee = make_employee("test_esi_code_wages_ctc@indiapayroll.com", company="_Test Company")
+			structure = make_salary_structure(
+				"Test ESI Code Wages CTC Structure",
+				"Monthly",
+				company="_Test Company",
+				currency="INR",
+				earnings=components,
+				deductions=[],
+			)
+			create_salary_structure_assignment(
+				employee, structure.name, from_date="2026-10-01", company="_Test Company", base=30_000
+			)
+			slip = make_salary_slip(structure.name, employee=employee, posting_date="2026-10-01")
+			slip.start_date, slip.end_date = "2026-10-01", "2026-10-31"
+			slip.insert()
+
+			self.assertAlmostEqual(self._esi_rows(slip)[0].amount, 600, places=2)
+			legs = [e for e in slip.earnings if e.salary_component == EMPLOYER_ESI_COMPONENT]
+			self.assertEqual([flt(e.amount) for e in legs], [488])
+			self.assertAlmostEqual(slip.gross_pay, 15_000 + 12_000 + 488, places=2)
+			self.assertAlmostEqual(slip.gross_pay - slip.net_pay, 600, places=2)
+		finally:
+			frappe.db.set_value("Company", "_Test Company", "hra_component", previous_hra)

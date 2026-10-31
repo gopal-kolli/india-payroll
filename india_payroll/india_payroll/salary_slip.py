@@ -8,7 +8,10 @@ from india_payroll.india_payroll.professional_tax import apply_professional_tax
 
 
 def apply_regional_deductions(doc) -> None:
-	apply_professional_tax(doc)
-	apply_esi(doc)
-	apply_lwf(doc)
+	# EPF, then ESI: each sizes its employer earning in CTC-style structures and
+	# refreshes gross pay. ESI wages count the settled employer PF; Professional
+	# Tax reads the final gross.
 	apply_epf(doc)
+	apply_esi(doc)
+	apply_professional_tax(doc)
+	apply_lwf(doc)
