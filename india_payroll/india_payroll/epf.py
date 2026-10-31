@@ -7,7 +7,12 @@ import frappe
 from frappe.utils import flt, getdate
 
 from india_payroll.india_payroll.code_wages import get_code_wages
-from india_payroll.india_payroll.utils import get_slip_ssa_values
+from india_payroll.india_payroll.utils import (
+	get_slip_ssa_values,
+	refresh_gross_pay,
+	set_structure_leg,
+	structure_carries,
+)
 
 # Employee deductions (reduce net pay).  Employer EPF/EPS/EDLI/Admin are
 # components of type "Employer Contribution" and live on the Salary Structure's
@@ -17,6 +22,11 @@ EPF_EMPLOYEE_COMPONENT = "Provident Fund"
 VPF_COMPONENT = "Voluntary Provident Fund"
 
 EPF_EMPLOYEE_COMPONENTS = (EPF_EMPLOYEE_COMPONENT, VPF_COMPONENT)
+
+# CTC-style structures carry the employer's matching 12% as this earning, taken back by
+# the deduction of the same amount; apply_epf sizes both to the employee's share.
+EMPLOYER_PF_EARNING = "Employer PF"
+EMPLOYER_PF_DEDUCTION = "Provident Fund - Employer"
 
 # --- Statutory constants --------------------------------------------------
 # Employer-side rates remain here even though the slip hook no longer applies
@@ -45,7 +55,9 @@ def apply_epf(doc, method=None) -> None:
 
 	Employer contributions (EPF / EPS / EDLI / Admin) are configured as
 	"Employer Contribution" components on the Salary Structure and handled
-	by Salary Structure Assignment / CTC — not by this hook.
+	by Salary Structure Assignment / CTC — not by this hook. A CTC-style
+	structure that carries them as an "Employer PF" earning and "Provident
+	Fund - Employer" deduction has both sized to the employee's share.
 
 	Gated by a single `epf_applicable` flag on the Salary Structure Assignment.
 	All employees are assumed to be post-1 Sept 2014 EPF members.
@@ -79,17 +91,26 @@ def apply_epf(doc, method=None) -> None:
 		)
 		return
 
-	pf_wage = _compute_pf_wage(doc)
+	contribute_on_actual = bool(ssa.get("contribute_on_actual_pf_wage"))
+	sizes_employer_leg = structure_carries(doc.salary_structure, "earnings", EMPLOYER_PF_EARNING)
+
+	# The employer's PF is itself remuneration in the section 2(88) one-half test, so in a
+	# month with one-off pay the PF wage and the employer leg depend on each other. Each
+	# round moves the wage by 6% of the previous move, so a few rounds settle it.
+	for _ in range(5):
+		pf_wage = _compute_pf_wage(doc)
+		epf_base = (
+			pf_wage if contribute_on_actual else get_capped_pf_wage(pf_wage, doc.start_date, doc.end_date)
+		)
+		employee_epf = _epfo_round(epf_base * EPF_EMPLOYEE_RATE) if pf_wage > 0 else 0
+		if not sizes_employer_leg or not _set_employer_pf_leg(doc, employee_epf):
+			break
+
 	if pf_wage <= 0:
 		# Nothing to contribute on (e.g. no components flagged as PF wage)
 		_remove_epf_components(doc)
 		return
 
-	contribute_on_actual = bool(ssa.get("contribute_on_actual_pf_wage"))
-	pf_wage_capped = get_capped_pf_wage(pf_wage, doc.start_date, doc.end_date)
-	epf_base = pf_wage if contribute_on_actual else pf_wage_capped
-
-	employee_epf = _epfo_round(epf_base * EPF_EMPLOYEE_RATE)
 	vpf = _compute_vpf(
 		doc,
 		epf_base,
@@ -99,6 +120,17 @@ def apply_epf(doc, method=None) -> None:
 	)
 
 	_apply_epf_components(doc, employee_epf=employee_epf, vpf=vpf)
+
+
+def _set_employer_pf_leg(doc, amount: float) -> bool:
+	"""Match the "Employer PF" earning and its "Provident Fund - Employer" deduction to the
+	employee's share. Returns whether the earning changed, which moves the PF wage."""
+	changed = set_structure_leg(doc, "earnings", EMPLOYER_PF_EARNING, amount)
+	if structure_carries(doc.salary_structure, "deductions", EMPLOYER_PF_DEDUCTION):
+		set_structure_leg(doc, "deductions", EMPLOYER_PF_DEDUCTION, amount)
+	if changed:
+		refresh_gross_pay(doc)
+	return changed
 
 
 # ---------------------------------------------------------------------------

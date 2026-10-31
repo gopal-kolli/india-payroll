@@ -6,7 +6,12 @@ from frappe.query_builder import DocType
 from frappe.utils import flt, getdate
 
 from india_payroll.india_payroll.code_wages import get_code_wages
-from india_payroll.india_payroll.utils import get_slip_ssa_values
+from india_payroll.india_payroll.utils import (
+	get_slip_ssa_values,
+	refresh_gross_pay,
+	set_structure_leg,
+	structure_carries,
+)
 
 ESI_EMPLOYEE_COMPONENT = "Employee State Insurance"
 
@@ -126,55 +131,12 @@ def _set_employer_esi_leg(doc, wages: float) -> None:
 	The leg is rounded up to the rupee so the employee never bears more than
 	0.75%. An Additional Salary on the component is left as entered.
 	"""
-	if not _structure_carries_employer_esi(doc.salary_structure):
+	if not structure_carries(doc.salary_structure, "earnings", EMPLOYER_ESI_COMPONENT):
 		return
 
 	amount = math.ceil(flt(wages * EMPLOYER_ESI_RATE, 2))
-	rows = [
-		e
-		for e in doc.earnings
-		if e.salary_component == EMPLOYER_ESI_COMPONENT and not e.get("additional_salary")
-	]
-	doc.earnings = [e for e in doc.earnings if not any(e is r for r in rows[1:])]
-
-	if amount:
-		row = rows[0] if rows else doc.append("earnings", _employer_esi_row())
-		row.amount = row.default_amount = amount
-		row.additional_amount = 0
-		row.depends_on_payment_days = 0
-	elif rows:
-		doc.earnings = [e for e in doc.earnings if e is not rows[0]]
-
-	doc.gross_pay = doc.get_component_totals("earnings", depends_on_payment_days=1)
-	doc.base_gross_pay = flt(flt(doc.gross_pay) * flt(doc.exchange_rate), doc.precision("base_gross_pay"))
-
-
-def _structure_carries_employer_esi(salary_structure: str) -> bool:
-	return bool(
-		frappe.db.exists(
-			"Salary Detail",
-			{
-				"parenttype": "Salary Structure",
-				"parent": salary_structure,
-				"parentfield": "earnings",
-				"salary_component": EMPLOYER_ESI_COMPONENT,
-			},
-		)
-	)
-
-
-def _employer_esi_row() -> dict:
-	component = frappe.get_cached_doc("Salary Component", EMPLOYER_ESI_COMPONENT)
-	return {
-		"salary_component": component.name,
-		"abbr": component.salary_component_abbr,
-		"depends_on_payment_days": 0,
-		"do_not_include_in_total": component.do_not_include_in_total,
-		"is_tax_applicable": component.is_tax_applicable,
-		"is_flexible_benefit": component.is_flexible_benefit,
-		"variable_based_on_taxable_salary": component.variable_based_on_taxable_salary,
-		"exempted_from_income_tax": component.exempted_from_income_tax,
-	}
+	if set_structure_leg(doc, "earnings", EMPLOYER_ESI_COMPONENT, amount):
+		refresh_gross_pay(doc)
 
 
 def _remove_esi_components(doc) -> None:
