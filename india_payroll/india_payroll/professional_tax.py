@@ -4,9 +4,14 @@ import frappe
 from frappe.query_builder.functions import Sum
 from frappe.utils import flt, getdate
 
+from india_payroll.india_payroll.code_wages import EMPLOYER_FUND_EARNINGS, NOT_REMUNERATION_EARNINGS
 from india_payroll.india_payroll.utils import get_slip_ssa_values
 
 PT_SALARY_COMPONENT = "Professional Tax"
+
+# CTC-style structures carry the employer's PF, NPS and ESI contributions as earnings, so they sit in
+# gross pay. They are paid to the funds, never to the employee, so they are not salary for PT.
+EMPLOYER_CONTRIBUTION_EARNINGS = EMPLOYER_FUND_EARNINGS | NOT_REMUNERATION_EARNINGS
 
 # ---------------------------------------------------------------------------
 # State-wise Professional Tax configuration
@@ -66,11 +71,15 @@ STATE_PT_CONFIG = {
 	},
 	"Karnataka": {
 		"frequency": "monthly",
+		# Karnataka Tax on Professions (Amendment) Act, 2025, from 1 Apr 2025: nil up to ₹25,000 a month,
+		# ₹200 above it, ₹300 in February (11 * ₹200 + ₹300 = the ₹2,500 annual cap). No ₹150 band.
 		"slabs": [
 			{"upto": 25000, "amount": 0},
-			{"upto": 41666, "amount": 150},
 			{"upto": None, "amount": 200},
 		],
+		"special_rules": {
+			"february_amount": 300,
+		},
 	},
 	"Madhya Pradesh": {
 		"frequency": "monthly",
@@ -228,7 +237,7 @@ def apply_professional_tax(doc, method=None) -> None:
 	if state_config["frequency"] == "half-yearly":
 		pt_amount = _compute_pt_half_yearly(doc, state_config)
 	else:
-		pt_amount = _compute_pt_monthly(flt(doc.gross_pay), state_config, payroll_month, gender)
+		pt_amount = _compute_pt_monthly(get_pt_salary(doc), state_config, payroll_month, gender)
 
 	_update_pt_in_salary_slip(doc, pt_amount)
 
@@ -257,7 +266,17 @@ def validate_employment_state(doc, method=None) -> None:
 		)
 
 
-def _compute_pt_monthly(gross_pay: float, state_config: dict, month: int, gender: str) -> float:
+def get_pt_salary(doc) -> float:
+	"""Salary for Professional Tax: gross pay less the employer contribution earnings counted in it."""
+	return flt(doc.gross_pay) - sum(
+		flt(row.get("amount"))
+		for row in doc.get("earnings") or []
+		if row.get("salary_component") in EMPLOYER_CONTRIBUTION_EARNINGS
+		and not row.get("do_not_include_in_total")
+	)
+
+
+def _compute_pt_monthly(salary: float, state_config: dict, month: int, gender: str) -> float:
 	"""
 	Return the Professional Tax amount for a monthly-frequency state.
 
@@ -269,15 +288,15 @@ def _compute_pt_monthly(gross_pay: float, state_config: dict, month: int, gender
 
 	# Women earning up to the exemption threshold are fully exempt
 	women_upto = special_rules.get("women_exemption_upto")
-	if women_upto and gender == "Female" and gross_pay <= women_upto:
+	if women_upto and gender == "Female" and salary <= women_upto:
 		return 0.0
 
-	pt_amount = _slab_amount(gross_pay, state_config["slabs"])
+	pt_amount = _slab_amount(salary, state_config["slabs"])
 
 	# Maharashtra February rule: employees in the highest slab pay ₹300
 	# instead of ₹200 so that the annual total equals ₹2,500.
 	feb_amount = special_rules.get("february_amount")
-	if feb_amount and month == 2 and _is_highest_slab(gross_pay, state_config["slabs"]):
+	if feb_amount and month == 2 and _is_highest_slab(salary, state_config["slabs"]):
 		pt_amount = feb_amount
 
 	return flt(pt_amount)
@@ -291,19 +310,19 @@ def _compute_pt_half_yearly(doc, state_config: dict) -> float:
 	Strategy (incremental deduction):
 	  1. Determine the April-September or October-March period containing
 		 the salary slip.
-	  2. Sum gross_pay from all *submitted* slips in that period (excluding
-		 the current slip, which may not be submitted yet).
-	  3. Add the current slip's gross_pay to get the cumulative figure.
+	  2. Sum PT salary (see get_pt_salary) from all *submitted* slips in that
+		 period (excluding the current slip, which may not be submitted yet).
+	  3. Add the current slip's PT salary to get the cumulative figure.
 	  4. Apply the state's slab to that cumulative figure → total PT due.
 	  5. Subtract PT already deducted in earlier slips of the same period.
 	  6. The remainder is this month's PT (minimum 0).
 	"""
 	period_start, period_end = _half_year_period(getdate(doc.start_date))
 
-	prior_gross = _cumulative_gross(doc.employee, period_start, period_end, exclude=doc.name)
-	cumulative_gross = flt(prior_gross) + flt(doc.gross_pay)
+	prior_salary = _cumulative_pt_salary(doc.employee, period_start, period_end, exclude=doc.name)
+	cumulative_salary = flt(prior_salary) + get_pt_salary(doc)
 
-	total_pt_due = _slab_amount(cumulative_gross, state_config["slabs"])
+	total_pt_due = _slab_amount(cumulative_salary, state_config["slabs"])
 	already_deducted = _cumulative_pt_deducted(doc.employee, period_start, period_end, exclude=doc.name)
 
 	return max(0.0, flt(total_pt_due) - flt(already_deducted))
@@ -320,29 +339,39 @@ def _half_year_period(date: datetime.date) -> tuple[datetime.date, datetime.date
 		return datetime.date(year - 1, 10, 1), datetime.date(year, 3, 31)
 
 
-def _cumulative_gross(
+def _cumulative_pt_salary(
 	employee: str,
 	period_start: datetime.date,
 	period_end: datetime.date,
 	exclude: str | None = None,
 ) -> float:
-	"""Sum of gross_pay from submitted salary slips in the half-year period."""
+	"""PT salary (gross pay less employer contribution earnings) from submitted salary slips in the half-year period."""
 	SalarySlip = frappe.qb.DocType("Salary Slip")
-	query = (
-		frappe.qb.from_(SalarySlip)
-		.select(Sum(SalarySlip.gross_pay))
-		.where(
-			(SalarySlip.employee == employee)
-			& (SalarySlip.docstatus == 1)
-			& (SalarySlip.start_date >= period_start)
-			& (SalarySlip.end_date <= period_end)
-		)
+	SalaryDetail = frappe.qb.DocType("Salary Detail")
+	in_period = (
+		(SalarySlip.employee == employee)
+		& (SalarySlip.docstatus == 1)
+		& (SalarySlip.start_date >= period_start)
+		& (SalarySlip.end_date <= period_end)
 	)
 	if exclude:
-		query = query.where(SalarySlip.name != exclude)
+		in_period = in_period & (SalarySlip.name != exclude)
 
-	result = query.run()
-	return flt(result[0][0]) if result and result[0][0] else 0.0
+	gross = frappe.qb.from_(SalarySlip).select(Sum(SalarySlip.gross_pay)).where(in_period).run()
+	employer_legs = (
+		frappe.qb.from_(SalarySlip)
+		.join(SalaryDetail)
+		.on(SalarySlip.name == SalaryDetail.parent)
+		.select(Sum(SalaryDetail.amount))
+		.where(
+			in_period
+			& (SalaryDetail.parentfield == "earnings")
+			& (SalaryDetail.salary_component.isin(sorted(EMPLOYER_CONTRIBUTION_EARNINGS)))
+			& (SalaryDetail.do_not_include_in_total == 0)
+		)
+		.run()
+	)
+	return flt(gross[0][0] if gross else 0) - flt(employer_legs[0][0] if employer_legs else 0)
 
 
 def _cumulative_pt_deducted(

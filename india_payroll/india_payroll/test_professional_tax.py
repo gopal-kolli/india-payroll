@@ -3,6 +3,7 @@
 
 import frappe
 from erpnext.setup.doctype.employee.test_employee import make_employee
+from hrms.payroll.doctype.salary_slip.test_salary_slip import make_salary_component
 from hrms.payroll.doctype.salary_structure.salary_structure import make_salary_slip
 from hrms.payroll.doctype.salary_structure.test_salary_structure import (
 	create_salary_structure_assignment,
@@ -10,6 +11,13 @@ from hrms.payroll.doctype.salary_structure.test_salary_structure import (
 )
 from hrms.tests.utils import HRMSTestSuite
 
+from india_payroll.india_payroll.esi import EMPLOYER_ESI_COMPONENT
+from india_payroll.india_payroll.professional_tax import (
+	STATE_PT_CONFIG,
+	_compute_pt_monthly,
+	_slab_amount,
+	get_pt_salary,
+)
 from india_payroll.install import create_professional_tax_component
 
 
@@ -146,3 +154,78 @@ class TestProfessionalTax(HRMSTestSuite):
 		pt_rows = [d for d in salary_slip.deductions if d.salary_component == "Professional Tax"]
 		self.assertEqual(len(pt_rows), 1)
 		self.assertEqual(pt_rows[0].amount, 1440)
+
+	def test_pt_salary_excludes_employer_contribution_legs(self):
+		"""
+		A CTC-style month: cash salary ₹18,714, plus the
+		Employer PF and Employer ESI legs in gross pay (₹20,349). PT is on the
+		salary, so the Telangana slab is ₹150, not the ₹200 the gross would give.
+		"""
+		row = lambda component, amount: frappe._dict(  # noqa: E731
+			salary_component=component, amount=amount, do_not_include_in_total=0
+		)
+		slip = frappe._dict(
+			gross_pay=20_349,
+			earnings=[
+				row("Basic", 10_000),
+				row("House Rent Allowance", 8_000),
+				row("Special Allowance", 714),
+				row("Employer PF", 1_286),
+				row("Employer ESI", 349),
+			],
+		)
+		slabs = STATE_PT_CONFIG["Telangana"]["slabs"]
+		self.assertEqual(get_pt_salary(slip), 18_714)
+		self.assertEqual(_slab_amount(get_pt_salary(slip), slabs), 150)
+		self.assertEqual(_slab_amount(slip.gross_pay, slabs), 200)
+
+	@HRMSTestSuite.change_settings("Payroll Settings", {"enable_professional_tax": 1, "enable_esic": 0})
+	def test_telangana_pt_ignores_employer_esi_leg_in_gross(self):
+		"""
+		Salary ₹18,714 + an Employer ESI earning of ₹1,635 gives gross ₹20,349.
+		Telangana PT is ₹150 on the salary, not ₹200 on the gross.
+		"""
+		components = [
+			{"salary_component": "PT Test Salary", "abbr": "PTS", "formula": "base", "type": "Earning"},
+			{
+				"salary_component": EMPLOYER_ESI_COMPONENT,
+				"abbr": "EESI",
+				"formula": "1635",
+				"type": "Earning",
+			},
+		]
+		for c in components:
+			c.update(amount_based_on_formula=1, depends_on_payment_days=0)
+			if not frappe.db.exists("Salary Component", c["salary_component"]):
+				make_salary_component([dict(c)], False, ["_Test Company"])
+
+		employee = make_employee("test_telangana_pt_legs@indiapayroll.com", company="_Test Company")
+		structure = make_salary_structure(
+			"Test PT Telangana Employer Legs",
+			"Monthly",
+			company="_Test Company",
+			currency="INR",
+			earnings=components,
+			deductions=[],
+		)
+		ssa = create_salary_structure_assignment(
+			employee, structure.name, from_date="2026-10-01", company="_Test Company", base=18_714
+		)
+		frappe.db.set_value("Salary Structure Assignment", ssa.name, "employment_state", "Telangana")
+
+		slip = make_salary_slip(structure.name, employee=employee, posting_date="2026-10-01")
+		slip.start_date, slip.end_date = "2026-10-01", "2026-10-31"
+		slip.insert()
+
+		self.assertAlmostEqual(slip.gross_pay, 20_349, places=2)
+		pt_rows = [d for d in slip.deductions if d.salary_component == "Professional Tax"]
+		self.assertEqual([d.amount for d in pt_rows], [150])
+
+	def test_karnataka_flat_200_above_25000_and_300_in_february(self):
+		"""Karnataka from 1 Apr 2025: nil up to ₹25,000, ₹200 above it, ₹300 in February."""
+		karnataka = STATE_PT_CONFIG["Karnataka"]
+		self.assertEqual(_compute_pt_monthly(25_000, karnataka, 10, "Male"), 0)
+		self.assertEqual(_compute_pt_monthly(25_001, karnataka, 10, "Male"), 200)
+		self.assertEqual(_compute_pt_monthly(32_750, karnataka, 10, "Female"), 200)
+		self.assertEqual(_compute_pt_monthly(32_750, karnataka, 2, "Male"), 300)
+		self.assertEqual(_compute_pt_monthly(20_000, karnataka, 2, "Male"), 0)
