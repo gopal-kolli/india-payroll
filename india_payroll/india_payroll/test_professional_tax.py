@@ -12,7 +12,12 @@ from hrms.payroll.doctype.salary_structure.test_salary_structure import (
 from hrms.tests.utils import HRMSTestSuite
 
 from india_payroll.india_payroll.esi import EMPLOYER_ESI_COMPONENT
-from india_payroll.india_payroll.professional_tax import STATE_PT_CONFIG, _slab_amount, get_pt_salary
+from india_payroll.india_payroll.professional_tax import (
+	STATE_PT_CONFIG,
+	_compute_pt_monthly,
+	_slab_amount,
+	get_pt_salary,
+)
 from india_payroll.install import create_professional_tax_component
 
 
@@ -215,3 +220,12 @@ class TestProfessionalTax(HRMSTestSuite):
 		self.assertAlmostEqual(slip.gross_pay, 20_349, places=2)
 		pt_rows = [d for d in slip.deductions if d.salary_component == "Professional Tax"]
 		self.assertEqual([d.amount for d in pt_rows], [150])
+
+	def test_karnataka_flat_200_above_25000_and_300_in_february(self):
+		"""Karnataka from 1 Apr 2025: nil up to ₹25,000, ₹200 above it, ₹300 in February."""
+		karnataka = STATE_PT_CONFIG["Karnataka"]
+		self.assertEqual(_compute_pt_monthly(25_000, karnataka, 10, "Male"), 0)
+		self.assertEqual(_compute_pt_monthly(25_001, karnataka, 10, "Male"), 200)
+		self.assertEqual(_compute_pt_monthly(32_750, karnataka, 10, "Female"), 200)
+		self.assertEqual(_compute_pt_monthly(32_750, karnataka, 2, "Male"), 300)
+		self.assertEqual(_compute_pt_monthly(20_000, karnataka, 2, "Male"), 0)

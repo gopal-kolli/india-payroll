@@ -71,11 +71,15 @@ STATE_PT_CONFIG = {
 	},
 	"Karnataka": {
 		"frequency": "monthly",
+		# Karnataka Tax on Professions (Amendment) Act, 2025, from 1 Apr 2025: nil up to ₹25,000 a month,
+		# ₹200 above it, ₹300 in February (11 * ₹200 + ₹300 = the ₹2,500 annual cap). No ₹150 band.
 		"slabs": [
 			{"upto": 25000, "amount": 0},
-			{"upto": 41666, "amount": 150},
 			{"upto": None, "amount": 200},
 		],
+		"special_rules": {
+			"february_amount": 300,
+		},
 	},
 	"Madhya Pradesh": {
 		"frequency": "monthly",
